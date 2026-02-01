@@ -1,0 +1,8 @@
+cat > requirements.txt << 'EOF'
+streamlit>=1.23.0
+pandas
+numpy
+plotly
+openpyxl
+pyarrow
+EOF
