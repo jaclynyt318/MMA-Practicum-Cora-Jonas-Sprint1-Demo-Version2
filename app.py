@@ -660,182 +660,164 @@ elif page == "About This Data":
 # Page: Upload & Modeling (Placeholder + Kaggle-style explorer shell)
 # ============================
 elif page == "Upload & Modeling":
+    from src.scoring.constants import REQUIRED_FIELDS, OPTIONAL_FIELDS, UI_LABELS
+    from src.scoring.schema import fingerprint_input
+    from src.scoring.scoring import score_dataframe
+
     with st.container(border=True):
         st.subheader("Upload & Modeling")
-        st.caption("Placeholder module — will be wired to the modeling pipeline once available")
-        st.markdown(
-            """
-This section is intentionally a **scaffold** so the demo can show the product structure now and plug in the modeling code later.
+        st.caption("Upload a customer-level CSV/XLSX → Map fields (DISCO-style) → Confirm → Compute churn risk")
 
-Planned workflow:
-1) Upload CSV/XLSX  
-2) Column mapping (ID fields, date fields, numeric/categorical fields)  
-3) Confirm schema & data profile (**Kaggle-style explorer**)  
-4) Compute outputs (risk table + recommended actions)  
-5) Download results
-            """
+    uploaded = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
+
+    if uploaded is None:
+        st.info("Upload a file to begin. You can test with: data/sample/customer_health_sample.csv")
+        st.stop()
+
+    # Load file
+    if uploaded.name.lower().endswith(".xlsx"):
+        df_raw = pd.read_excel(uploaded)
+    else:
+        df_raw = pd.read_csv(uploaded)
+
+    st.markdown("### 1) Input Preview")
+    st.dataframe(df_raw.head(30), use_container_width=True)
+
+    # Build mapping UI
+    st.markdown("### 2) Map Columns (Required)")
+    cols = [""] + df_raw.columns.tolist()
+
+    # Keep mapping in session_state
+    if "field_mapping" not in st.session_state:
+        st.session_state.field_mapping = {}
+
+    mapping = {}
+    for f in REQUIRED_FIELDS:
+        default_guess = ""
+        # heuristic guesses
+        for c in df_raw.columns:
+            if c.lower() == f.lower():
+                default_guess = c
+                break
+        mapping[f] = st.selectbox(
+            f"{UI_LABELS.get(f, f)}  →",
+            cols,
+            index=(cols.index(default_guess) if default_guess in cols else 0),
+            key=f"map_{f}",
         )
 
+    st.markdown("### 3) Map Columns (Optional)")
+    for f in OPTIONAL_FIELDS:
+        default_guess = ""
+        for c in df_raw.columns:
+            if c.lower() == f.lower():
+                default_guess = c
+                break
+        mapping[f] = st.selectbox(
+            f"{UI_LABELS.get(f, f)}  →",
+            cols,
+            index=(cols.index(default_guess) if default_guess in cols else 0),
+            key=f"map_opt_{f}",
+        )
+
+    # Confirm mapping
+    st.markdown("### 4) Confirm Mapping")
+    mapped_preview_cols = {k: v for k, v in mapping.items() if v}
+    st.write("**Mapped fields:**")
+    st.json(mapped_preview_cols)
+
+    confirmed = st.checkbox("I confirm the mapping is correct", value=False)
+
+    # Stable caching: only recompute when (file fingerprint + mapping) changes
+    fp = fingerprint_input(df_raw)
+    mapping_key = str(sorted(mapped_preview_cols.items()))
+    cache_key = f"{fp}::{mapping_key}"
+
+    if "scored_cache_key" not in st.session_state:
+        st.session_state.scored_cache_key = None
+    if "scored_df" not in st.session_state:
+        st.session_state.scored_df = None
+
+    colA, colB = st.columns([1, 2])
+    with colA:
+        compute = st.button("Compute churn risk", type="primary", disabled=(not confirmed))
+    with colB:
+        st.caption("Filters/sorting/download will NOT re-run scoring. Scoring runs only when you click Compute.")
+
+    if compute:
+        try:
+            # Translate mapping: internal -> selected user col
+            internal_mapping = {k: (v if v else "") for k, v in mapping.items()}
+
+            scored = score_dataframe(df_raw, mapping=internal_mapping)
+
+            st.session_state.scored_df = scored
+            st.session_state.scored_cache_key = cache_key
+            st.success(f"Computed risk for {len(scored):,} accounts.")
+        except Exception as e:
+            st.error(f"Scoring failed: {e}")
+            st.stop()
+
+    # Display results if available
+    if st.session_state.scored_df is None:
+        st.warning("No results yet. Confirm mapping and click Compute.")
+        st.stop()
+
+    # Ensure we do NOT recompute here
+    result = st.session_state.scored_df
+
+    st.markdown("### 5) Top 10 customers requiring immediate attention")
+    top10 = result.sort_values("churn_probability", ascending=False).head(10)
+    st.dataframe(top10, use_container_width=True)
+
+    st.markdown("### 6) Full Results (Filter / Sort)")
+    # Simple filters that do not change scoring
+    f1, f2 = st.columns(2)
+    with f1:
+        tier_filter = st.multiselect("Risk Tier", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
+    with f2:
+        min_prob = st.slider("Min churn probability", 0.0, 1.0, 0.0, 0.01)
+
+    view = result[(result["risk_tier"].isin(tier_filter)) & (result["churn_probability"] >= min_prob)].copy()
+
+    st.dataframe(view, use_container_width=True)
+
+    st.markdown("### 7) Drill-down (Click a customer ID)")
+    selected_id = st.selectbox("Select account_id", view["account_id"].astype(str).tolist())
+    row = view.loc[view["account_id"].astype(str) == str(selected_id)].head(1)
+    if len(row) == 1:
+        r = row.iloc[0].to_dict()
+        st.write({
+            "Account ID": r.get("account_id"),
+            "Churn Probability": float(r.get("churn_probability")),
+            "Risk Tier": r.get("risk_tier"),
+            "Timeline": r.get("churn_timeline"),
+            "Drivers": r.get("top_drivers"),
+            "Recommended Actions": r.get("recommended_actions"),
+        })
+
+    st.markdown("### 8) Download results")
+    csv_bytes = view.to_csv(index=False).encode("utf-8")
+    st.download_button("Download filtered results (CSV)", data=csv_bytes, file_name="churn_risk_results.csv", mime="text/csv")
+
     with st.container(border=True):
-        st.subheader("Data Explorer (Prototype)")
-        st.caption("Compact preview + Schema & Column Profile")
+        st.subheader("Churn Risk Scoring")
 
-        raw_choices = [f"RAW • {k}" for k in RAW_FILES.keys()]
-        derived_choices = [f"DERIVED • {k}" for k in DERIVED_FILES.keys()]
-        file_choice = st.selectbox("Select a file to explore", raw_choices + derived_choices)
+        uploaded = st.file_uploader("Upload account-level CSV", type=["csv", "xlsx"])
 
-        df = None
-        file_label = ""
+        if uploaded:
+            df = pd.read_csv(uploaded)
+            st.dataframe(df.head(20), use_container_width=True)
 
-        if file_choice.startswith("RAW"):
-            k = file_choice.replace("RAW • ", "")
-            fname = RAW_FILES[k]
-            file_label = fname
-            if _exists(_raw_path(fname)):
-                df = load_raw(fname)
-            else:
-                st.error(f"Missing {fname} in data/raw/.")
-        else:
-            k = file_choice.replace("DERIVED • ", "")
-            fname = DERIVED_FILES[k]
-            file_label = fname
-            if _exists(_derived_path(fname)):
-                df = load_derived(fname)
-            else:
-                st.error(f"Missing {fname} in data/derived/. Run `python prep_eda.py`.")
+            if st.button("Run scoring"):
+                from src.scoring.predict import score_accounts
+                result = score_accounts(df)
 
-        tab1, tab2 = st.tabs(["Compact", "Schema & Column Profile"])
+                st.success("Scoring complete")
+                st.dataframe(result, use_container_width=True)
 
-        with tab1:
-            st.markdown(f"**File:** `{file_label}`")
-            if df is not None:
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    rs_card("Rows", fmt_int(len(df)), "Record count")
-                with c2:
-                    rs_card("Columns", fmt_int(df.shape[1]), "Field count")
-                with c3:
-                    missing_cells = int(df.isna().sum().sum())
-                    total_cells = int(df.shape[0] * df.shape[1])
-                    miss_rate = (missing_cells / total_cells) if total_cells else 0.0
-                    rs_card(
-                        "Missing cells",
-                        fmt_int(missing_cells),
-                        f"{miss_rate*100:.1f}% of all cells",
-                        pill_text="Health",
-                        pill_kind=("red" if miss_rate > 0.10 else "green"),
-                    )
-                st.markdown("**Preview (first 50 rows):**")
-                st.dataframe(df.head(50), use_container_width=True)
-
-        with tab2:
-            if df is not None:
-                def infer_type(s: pd.Series) -> str:
-                    if pd.api.types.is_bool_dtype(s):
-                        return "Boolean"
-                    if pd.api.types.is_integer_dtype(s):
-                        return "Integer"
-                    if pd.api.types.is_float_dtype(s):
-                        return "Float"
-                    if s.dtype == object:
-                        parsed = pd.to_datetime(s, errors="coerce")
-                        if parsed.notna().mean() > 0.8:
-                            has_time = (parsed.dt.hour.fillna(0) != 0).mean() > 0.05
-                            return "DateTime" if has_time else "Date"
-                    return "Text"
-
-                profile_rows = []
-                n = len(df)
-                for col in df.columns:
-                    s = df[col]
-                    missing = int(s.isna().sum())
-                    missing_rate = missing / n if n else 0.0
-                    uniq = int(s.nunique(dropna=True))
-                    dtype = infer_type(s)
-
-                    most_common_val = ""
-                    most_common_rate = np.nan
-                    vc = s.value_counts(dropna=True)
-                    if len(vc) > 0:
-                        most_common_val = str(vc.index[0])
-                        denom = (n - missing)
-                        most_common_rate = float(vc.iloc[0] / denom) if denom else np.nan
-
-                    profile_rows.append({
-                        "column": col,
-                        "inferred_type": dtype,
-                        "missing": missing,
-                        "missing_rate": missing_rate,
-                        "unique_values": uniq,
-                        "most_common": most_common_val,
-                        "most_common_rate": most_common_rate,
-                    })
-
-                prof = pd.DataFrame(profile_rows)
-                st.dataframe(prof, use_container_width=True)
-
-                st.markdown("---")
-                col_sel = st.selectbox("Pick a column", df.columns.tolist())
-                s = df[col_sel]
-                dtype = infer_type(s)
-                missing = int(s.isna().sum())
-                uniq = int(s.nunique(dropna=True))
-
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    rs_card("Inferred type", dtype, "Heuristic inference")
-                with c2:
-                    rs_card("Missing", fmt_int(missing), f"{(missing/n*100 if n else 0):.1f}%")
-                with c3:
-                    rs_card("Unique", fmt_int(uniq), f"{(uniq/n*100 if n else 0):.1f}% of rows")
-                with c4:
-                    id_like = (uniq / n) > 0.95 if n else False
-                    rs_card("Heuristic", "ID-like" if id_like else "Not ID-like", "Based on uniqueness")
-
-                with st.container(border=True):
-                    st.subheader("Distribution Preview")
-                    st.caption("Chart type chosen by inferred column type")
-
-                    if dtype in ("Integer", "Float"):
-                        vals = pd.to_numeric(s, errors="coerce").dropna()
-                        if len(vals) > 0:
-                            fig = px.histogram(vals, nbins=30, title="")
-                            fig.update_layout(template="plotly_white", margin=dict(l=10, r=10, t=10, b=10), height=320)
-                            st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.warning("No numeric values to plot.")
-
-                    elif dtype in ("Date", "DateTime"):
-                        dt = pd.to_datetime(s, errors="coerce").dropna()
-                        if len(dt) > 0:
-                            by_m = dt.dt.to_period("M").dt.to_timestamp().value_counts().sort_index()
-                            tmp = pd.DataFrame({"period": by_m.index, "count": by_m.values})
-                            fig = px.bar(tmp, x="period", y="count", title="")
-                            fig.update_layout(template="plotly_white", margin=dict(l=10, r=10, t=10, b=10), height=320)
-                            st.plotly_chart(fig, use_container_width=True)
-                            st.caption(f"Range: {dt.min().date()} → {dt.max().date()}")
-                        else:
-                            st.warning("No parsable dates to plot.")
-
-                    elif dtype == "Boolean":
-                        vc = s.astype("boolean").value_counts(dropna=True)
-                        tmp = pd.DataFrame({"value": vc.index.astype(str), "count": vc.values})
-                        fig = px.pie(tmp, names="value", values="count", title="")
-                        fig.update_layout(template="plotly_white", margin=dict(l=10, r=10, t=10, b=10), height=320)
-                        st.plotly_chart(fig, use_container_width=True)
-
-                    else:
-                        vc = s.value_counts(dropna=True).head(15)
-                        if len(vc) > 0:
-                            tmp = pd.DataFrame({"value": vc.index.astype(str), "count": vc.values})
-                            fig = px.bar(tmp, x="value", y="count", title="")
-                            fig.update_layout(template="plotly_white", margin=dict(l=10, r=10, t=10, b=10), height=320)
-                            st.plotly_chart(fig, use_container_width=True)
-                            st.caption("Top 15 most common values (categorical-like preview).")
-                        else:
-                            st.warning("No values to summarize.")
-
-    data_sources_note(
-        ["(Prototype) raw + derived CSVs"],
-        definitions="This explorer is a UI scaffold inspired by Kaggle-style file exploration: Compact preview + column profiling."
-    )
+                st.download_button(
+                    "Download results",
+                    result.to_csv(index=False),
+                    file_name="churn_risk_output.csv",
+                )
